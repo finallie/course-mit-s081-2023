@@ -12,7 +12,7 @@ sys_exit(void)
   int n;
   argint(0, &n);
   exit(n);
-  return 0;  // not reached
+  return 0; // not reached
 }
 
 uint64
@@ -43,7 +43,7 @@ sys_sbrk(void)
 
   argint(0, &n);
   addr = myproc()->sz;
-  if(growproc(n) < 0)
+  if (growproc(n) < 0)
     return -1;
   return addr;
 }
@@ -54,12 +54,13 @@ sys_sleep(void)
   int n;
   uint ticks0;
 
-
   argint(0, &n);
   acquire(&tickslock);
   ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(killed(myproc())){
+  while (ticks - ticks0 < n)
+  {
+    if (killed(myproc()))
+    {
       release(&tickslock);
       return -1;
     }
@@ -69,13 +70,17 @@ sys_sleep(void)
   return 0;
 }
 
-
 #ifdef LAB_PGTBL
-int
-sys_pgaccess(void)
+int sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
-  return 0;
+  void *base, *mask;
+  int len;
+  argaddr(0, (uint64 *)&base);
+  argint(1, &len);
+  argaddr(2, (uint64 *)&mask);
+  // vmprint(myproc()->pagetable);
+  return pgaccess(base, len, mask);
 }
 #endif
 
