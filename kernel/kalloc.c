@@ -14,28 +14,39 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
-struct run {
+struct run
+{
   struct run *next;
 };
 
-struct {
+struct
+{
   struct spinlock lock;
   struct run *freelist;
 } kmem;
 
-void
-kinit()
+struct
 {
+  struct spinlock lock;
+  int count[(PHYSTOP - KERNBASE) / PGSIZE];
+} cow_count;
+
+void kinit()
+{
+  initlock(&cow_count.lock, "cow_count");
+  for (int i = 0; i < (PHYSTOP - KERNBASE) / PGSIZE; i++)
+  {
+    cow_count.count[i] = 1;
+  }
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  freerange(end, (void *)PHYSTOP);
 }
 
-void
-freerange(void *pa_start, void *pa_end)
+void freerange(void *pa_start, void *pa_end)
 {
   char *p;
-  p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  p = (char *)PGROUNDUP((uint64)pa_start);
+  for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
     kfree(p);
 }
 
@@ -43,18 +54,27 @@ freerange(void *pa_start, void *pa_end)
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
 // initializing the allocator; see kinit above.)
-void
-kfree(void *pa)
+void kfree(void *pa)
 {
   struct run *r;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&cow_count.lock);
+  int index = COW_INDEX(pa);
+  if (cow_count.count[index] <= 0)
+    panic("kfree: count is less than 0");
+  cow_count.count[index]--;
+  int count = cow_count.count[index];
+  release(&cow_count.lock);
+  if (count > 0)
+    return;
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
-  r = (struct run*)pa;
+  r = (struct run *)pa;
 
   acquire(&kmem.lock);
   r->next = kmem.freelist;
@@ -72,11 +92,46 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if (r)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  if (r)
+    memset((char *)r, 5, PGSIZE); // fill with junk
+
+  if (r)
+  {
+    int index = COW_INDEX(r);
+    if (cow_count.count[index] != 0)
+      panic("kalloc: cow_count is not 0");
+    cow_count.count[index] = 1;
+  }
+  return (void *)r;
+}
+
+void cow_to_w(pte_t *pte)
+{
+  if ((*pte & PTE_COW) == 0)
+    panic("cow_to_w: page is not copy-on-write");
+  *pte = (*pte & ~PTE_COW) | PTE_W;
+  uint64 pa = PTE2PA(*pte);
+  acquire(&cow_count.lock);
+  int index = COW_INDEX(pa);
+  if (cow_count.count[index] <= 0)
+    panic("cow_to_w: count is less than 0");
+  if (cow_count.count[index] > 1)
+  {
+    cow_count.count[index]--;
+    release(&cow_count.lock);
+    uint64 *new = kalloc();
+    if (new == 0)
+      panic("cow_to_w: kalloc failed");
+    memmove(new, (void *)pa, PGSIZE);
+    *pte = PA2PTE(new) | PTE_FLAGS(*pte);
+  }
+  else
+  {
+    release(&cow_count.lock);
+  }
+  sfence_vma();
 }
